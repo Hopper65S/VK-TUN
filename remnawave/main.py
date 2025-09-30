@@ -9,6 +9,7 @@ from asyncio.subprocess import PIPE
 from logging.handlers import TimedRotatingFileHandler
 from api import update_api_host
 import os
+from dynamic_config import DynamicConfigLoader
 try:
     import aiohttp
 except ImportError:
@@ -16,16 +17,51 @@ except ImportError:
     sys.exit(1)
 
 from handlers import TelegramCommandHandler
+config_loader = DynamicConfigLoader()
 
-# --- НАСТРОЙКИ (РЕДАКТИРОВАТЬ ЗДЕСЬ) ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")
-API_TOKEN = os.getenv("API_TOKEN")
-API_DOMAIN = os.getenv("API_DOMAIN")
-HEALTH_CHECK_INTERVAL_SECONDS = int(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "30"))
-TUNNEL_HOST = "127.0.0.1"
-TUNNEL_PORT = int(os.getenv("TUNNEL_PORT", "10001"))
+async def on_config_changed():
+    """Обработчик изменения конфигурации"""
+    global BOT_TOKEN, CHAT_ID, ALLOWED_USER_ID, API_TOKEN, API_DOMAIN
+    global HEALTH_CHECK_INTERVAL_SECONDS, TUNNEL_HOST, TUNNEL_PORT
+    global VPN_CONFIG, VK_TUNNEL_COMMAND
+    
+    # Перезагружаем переменные
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    CHAT_ID = os.getenv("CHAT_ID")
+    ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
+    API_TOKEN = os.getenv("API_TOKEN")
+    API_DOMAIN = os.getenv("API_DOMAIN")
+    HEALTH_CHECK_INTERVAL_SECONDS = int(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "30"))
+    TUNNEL_HOST = "127.0.0.1"  
+    TUNNEL_PORT = int(os.getenv("TUNNEL_PORT", "10001"))
+    
+    # Обновляем конфигурацию VPN
+    VPN_CONFIG["uuid"] = os.getenv("CONFIG_UUID", VPN_CONFIG["uuid"])
+    VPN_CONFIG["inbound"]["configProfileUuid"] = os.getenv("CONFIG_PROFILE_UUID", "")
+    VPN_CONFIG["inbound"]["configProfileInboundUuid"] = os.getenv("CONFIG_PROFILE_INBOUND_UUID", "")
+    
+    # Обновляем VK_TUNNEL_COMMAND с новыми значениями
+    VK_TUNNEL_COMMAND = [
+        "vk-tunnel", "--verbose", "--insecure=1", "--http-protocol=http", "--ws-protocol=ws",
+        "--ws-origin=0", "--host", TUNNEL_HOST, "--port", str(TUNNEL_PORT),
+        "--ws-ping-interval=30"
+    ]
+    
+    log.info("Конфигурация перезагружена из .env")
+    
+    # Обновляем telegram handler
+    if 'telegram_handler' in globals():
+        telegram_handler.bot_token = BOT_TOKEN
+        telegram_handler.owner_id = ALLOWED_USER_ID
+        
+    # Если нужно перезапустить туннель с новыми параметрами
+    if STATE.get('notification_sent') and TUNNEL_PORT != int(os.getenv("TUNNEL_PORT", "10001")):
+        log.info("Обнаружено изменение TUNNEL_PORT, требуется перезапуск туннеля")
+        await send_telegram_message("⚙️ Конфигурация изменена. Перезапускаю туннель...")
+        telegram_handler.manual_restart_event.set()
+
+# Добавляем callback
+config_loader.add_callback(on_config_changed)
 
 VK_TUNNEL_COMMAND = [
     "vk-tunnel", "--verbose", "--insecure=1", "--http-protocol=http", "--ws-protocol=ws",
@@ -396,7 +432,7 @@ async def main():
     log.info("Запуск менеджера vk-tunnel с управлением через Telegram.")
     log.info(f"Конфигурация: BOT_TOKEN={'*' * 10}, CHAT_ID={CHAT_ID}, ALLOWED_USER_ID={ALLOWED_USER_ID}")
     log.info(f"API: {API_DOMAIN}")
-
+    config_loader.start_watching()
     # Запускаем обе задачи параллельно
     await asyncio.gather(
         manage_vk_tunnel_lifecycle(),
